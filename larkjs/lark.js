@@ -673,8 +673,7 @@ function _deserialize(data, namespace, memo) {
 class Serialize {
   static deserialize(data, memo) {
     const cls = this;
-    let namespace = (cls && cls["__serialize_namespace__"]) || [];
-    namespace = Object.fromEntries(namespace.map((c) => [c.name, c]));
+    let namespace = Object.fromEntries(namespace.map((c) => [c.name, c]));
     let fields = cls && cls["__serialize_fields__"];
     if ("@" in data) {
       return memo[data["@"]];
