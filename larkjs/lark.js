@@ -34,6 +34,7 @@ function get_parser(options = {}) {
 
 const NO_VALUE = {};
 class _Decoratable {}
+const Discard = {};
 
 //
 //   Implementation of Scanner + module emulation for Python's stdlib re
@@ -365,7 +366,7 @@ class ConfigurationError extends LarkError {
 }
 
 function assert_config(value, options, msg = "Got %r, expected one of %s") {
-  if (!options.includes(value)) {
+  if (!(options.includes(value))) {
     throw new ConfigurationError(format(msg, value, options));
   }
 }
@@ -387,8 +388,9 @@ class LexError extends LarkError {
 
     Used as a base class for the following exceptions:
 
-    - ``UnexpectedToken``: The parser received an unexpected token
     - ``UnexpectedCharacters``: The lexer encountered an unexpected string
+    - ``UnexpectedToken``: The parser received an unexpected token
+    - ``UnexpectedEOF``: The parser expected a token, but the input ended
 
     After catching one of these exceptions, you may call the following helper methods to create a nicer error message.
     
@@ -441,8 +443,7 @@ class UnexpectedInput extends LarkError {
         Parameters:
             parse_fn: parse function (usually ``lark_instance.parse``)
             examples: dictionary of ``{'example_string': value}``.
-            use_accepts: Recommended to call this with ``use_accepts=True``.
-                The default is ``False`` for backwards compatibility.
+            use_accepts: Recommended to keep this as ``use_accepts=True``.
         
   */
   match_examples(
@@ -462,7 +463,6 @@ class UnexpectedInput extends LarkError {
         } catch (ut) {
           if (ut instanceof UnexpectedInput) {
             if (ut.state.eq(this.state)) {
-
                 if (ut.token === this.token) {
                   return label;
                 }
@@ -476,7 +476,6 @@ class UnexpectedInput extends LarkError {
                     candidate = [label, true];
                   }
                 }
-
               if (candidate[0] === null) {
                 candidate = [label, false];
               }
@@ -504,6 +503,11 @@ class UnexpectedInput extends LarkError {
   }
 }
 
+/**
+  An exception that is raised by the parser, when the input ends while it still expects a token.
+    
+*/
+
 class UnexpectedEOF extends UnexpectedInput {
   constructor(expected, state = null, terminals_by_name = null) {
     super();
@@ -517,6 +521,12 @@ class UnexpectedEOF extends UnexpectedInput {
     this._terminals_by_name = terminals_by_name;
   }
 }
+
+/**
+  An exception that is raised by the lexer, when it cannot match the next 
+    string of characters to any of its terminals.
+    
+*/
 
 class UnexpectedCharacters extends UnexpectedInput {
   constructor({
@@ -551,10 +561,15 @@ class UnexpectedCharacters extends UnexpectedInput {
   An exception that is raised by the parser, when the token it received
     doesn't match any valid step forward.
 
-    The parser provides an interactive instance through `interactive_parser`,
-    which is initialized to the point of failture, and can be used for debugging and error handling.
+    Parameters:
+        token: The mismatched token
+        expected: The set of expected tokens
+        considered_rules: Which rules were considered, to deduce the expected tokens
+        state: A value representing the parser state. Do not rely on its value or type.
+        interactive_parser: An instance of ``InteractiveParser``, that is initialized to the point of failture,
+                            and can be used for debugging and error handling.
 
-    see: ``InteractiveParser``.
+    Note: These parameters are available as attributes of the instance.
     
 */
 
@@ -598,8 +613,13 @@ class UnexpectedToken extends UnexpectedInput {
   VisitError is raised when visitors are interrupted by an exception
 
     It provides the following attributes for inspection:
-    - obj: the tree node or token it was processing when the exception was raised
-    - orig_exc: the exception that cause it to fail
+
+    Parameters:
+        rule: the name of the visit rule that failed
+        obj: the tree-node or token that was being processed
+        orig_exc: the exception that cause it to fail
+
+    Note: These parameters are available as attributes
     
 */
 
@@ -611,6 +631,7 @@ class VisitError extends LarkError {
       orig_exc
     );
     super(message);
+    this.rule = rule;
     this.obj = obj;
     this.orig_exc = orig_exc;
   }
@@ -858,6 +879,7 @@ class Tree {
     return this.find_pred((t) => t.data === data);
   }
 
+
   /**
     Return all values in the tree that evaluate pred(value) as true.
 
@@ -918,16 +940,6 @@ class Tree {
 //
 
 /**
-  When raising the Discard exception in a transformer callback,
-    that node is discarded and won't appear in the parent.
-    
-*/
-
-class Discard extends Error {
-  // pass
-}
-
-/**
   Transformers visit each node of the tree, and run the appropriate method on it according to the node's data.
 
     Methods are provided by the user via inheritance, and called according to ``tree.data``.
@@ -939,6 +951,8 @@ class Discard extends Error {
 
     ``Transformer`` can do anything ``Visitor`` can do, but because it reconstructs the tree,
     it is slightly less efficient.
+
+    To discard a node, return Discard (``lark.visitors.Discard``).
 
     All these classes implement the transformer interface:
 
@@ -988,7 +1002,7 @@ class Transformer extends _Decoratable {
           return f(children);
         }
       } catch (e) {
-        if (e instanceof GrammarError || e instanceof Discard) {
+        if (e instanceof GrammarError) {
           throw e;
         } else if (e instanceof Error) {
           throw new VisitError(tree.data, tree, e);
@@ -1008,7 +1022,7 @@ class Transformer extends _Decoratable {
       try {
         return f(token);
       } catch (e) {
-        if (e instanceof GrammarError || e instanceof Discard) {
+        if (e instanceof GrammarError) {
           throw e;
         } else if (e instanceof Error) {
           throw new VisitError(token.type, token, e);
@@ -1022,21 +1036,17 @@ class Transformer extends _Decoratable {
   }
 
   *_transform_children(children) {
+    let res;
     for (const c of children) {
-      try {
-        if (c instanceof Tree) {
-          yield this._transform_tree(c);
-        } else if (this.__visit_tokens__ && c instanceof Token) {
-          yield this._call_userfunc_token(c);
-        } else {
-          yield c;
-        }
-      } catch (e) {
-        if (e instanceof Discard) {
-          // pass
-        } else {
-          throw e;
-        }
+      if (c instanceof Tree) {
+        res = this._transform_tree(c);
+      } else if (this.__visit_tokens__ && c instanceof Token) {
+        res = this._call_userfunc_token(c);
+      } else {
+        res = c;
+      }
+      if (res !== Discard) {
+        yield res;
       }
     }
   }
@@ -1107,7 +1117,7 @@ class Transformer_InPlace extends Transformer {
 
 class Transformer_NonRecursive extends Transformer {
   transform(tree) {
-    let args, size;
+    let args, res, size;
     // Tree to postfix
     let rev_postfix = [];
     let q = [tree];
@@ -1130,9 +1140,15 @@ class Transformer_NonRecursive extends Transformer {
         } else {
           args = [];
         }
-        stack.push(this._call_userfunc(x, args));
+        res = this._call_userfunc(x, args);
+        if (res !== Discard) {
+          stack.push(res);
+        }
       } else if (this.__visit_tokens__ && x instanceof Token) {
-        stack.push(this._call_userfunc_token(x));
+        res = this._call_userfunc_token(x);
+        if (res !== Discard) {
+          stack.push(res);
+        }
       } else {
         stack.push(x);
       }
@@ -1289,13 +1305,9 @@ class Interpreter extends _Decoratable {
 // Grammar
 //
 
-class GrammarSymbol extends Serialize {
-  static get is_term() {
-    return NotImplemented;
-  }
-  get is_term() {
-    return this.constructor.is_term;
-  }
+var TOKEN_DEFAULT_PRIORITY = 0;
+class Symbol extends Serialize {
+  is_term = NotImplemented;
   constructor(name) {
     super();
     this.name = name;
@@ -1315,18 +1327,19 @@ class GrammarSymbol extends Serialize {
   get fullrepr() {
     return this.constructor.fullrepr;
   }
+  renamed(f) {
+    return type(this)(f(this.name));
+  }
 }
 
-class Terminal extends GrammarSymbol {
+class Terminal extends Symbol {
   static get __serialize_fields__() {
     return ["name", "filter_out"];
   }
-  static get is_term() {
-    return true;
-  }
   get is_term() {
-    return this.constructor.is_term;
+    return true
   }
+
   constructor(name, filter_out = false) {
     super();
     this.name = name;
@@ -1336,18 +1349,20 @@ class Terminal extends GrammarSymbol {
   get fullrepr() {
     return format("%s(%r, %r)", type(this).name, this.name, this.filter_out);
   }
+
+  renamed(f) {
+    return type(this)(f(this.name), this.filter_out);
+  }
 }
 
-class NonTerminal extends GrammarSymbol {
+class NonTerminal extends Symbol {
   static get __serialize_fields__() {
     return ["name"];
   }
-  static get is_term() {
-    return false;
-  }
   get is_term() {
-    return this.constructor.is_term;
+    return false
   }
+
 }
 
 class RuleOptions extends Serialize {
@@ -1441,18 +1456,6 @@ class Rule extends Serialize {
 // Lexer Implementation
 
 class Pattern extends Serialize {
-  static get raw() {
-    return null;
-  }
-  get raw() {
-    return this.constructor.raw;
-  }
-  static get type() {
-    return null;
-  }
-  get type() {
-    return this.constructor.type;
-  }
   constructor(value, flags = [], raw = null) {
     super();
     this.value = value;
@@ -1476,11 +1479,11 @@ class Pattern extends Serialize {
     throw new NotImplementedError();
   }
 
-  min_width() {
+  get min_width() {
     throw new NotImplementedError();
   }
 
-  max_width() {
+  get max_width() {
     throw new NotImplementedError();
   }
 
@@ -1493,12 +1496,7 @@ class PatternStr extends Pattern {
   static get __serialize_fields__() {
     return ["value", "flags"];
   }
-  static get type() {
-    return "str";
-  }
-  get type() {
-    return this.constructor.type;
-  }
+  type = "str";
   to_regexp() {
     return this._get_flags(re.escape(this.value));
   }
@@ -1507,11 +1505,8 @@ class PatternStr extends Pattern {
     return this.value.length;
   }
 
-  static get max_width() {
-    return this.min_width;
-  }
   get max_width() {
-    return this.constructor.max_width;
+    return this.value.length;
   }
 }
 
@@ -1519,12 +1514,7 @@ class PatternRE extends Pattern {
   static get __serialize_fields__() {
     return ["value", "flags", "_width"];
   }
-  static get type() {
-    return "re";
-  }
-  get type() {
-    return this.constructor.type;
-  }
+  type = "re";
   to_regexp() {
     return this._get_flags(this.value);
   }
@@ -1553,7 +1543,7 @@ class TerminalDef extends Serialize {
   static get __serialize_namespace__() {
     return [PatternStr, PatternRE];
   }
-  constructor(name, pattern, priority = 1) {
+  constructor(name, pattern, priority = TOKEN_DEFAULT_PRIORITY) {
     super();
     this.name = name;
     this.pattern = pattern;
@@ -1607,8 +1597,8 @@ class Token {
     end_pos = null
   ) {
     this.type = type_;
-    this.value = value;
     this.start_pos = start_pos;
+    this.value = value;
     this.line = line;
     this.column = column;
     this.end_line = end_line;
@@ -1736,7 +1726,7 @@ function _create_unless(terminals, g_regex_flags, re_, use_bytes) {
   for (const retok of tokens_by_type.get('PatternRE') || []) {
     unless = [];
     for (const strtok of tokens_by_type.get('PatternStr') || []) {
-      if (strtok.priority > retok.priority) {
+      if (strtok.priority !== retok.priority) {
         continue;
       }
 
@@ -1787,21 +1777,39 @@ function _regexp_has_newline(r) {
   );
 }
 
+class LexerState {
+  constructor(text, line_ctr, last_token = null) {
+    this.text = text;
+    this.line_ctr = line_ctr;
+    this.last_token = last_token;
+  }
+
+  eq(other) {
+    if (!(other instanceof LexerState)) {
+      return NotImplemented;
+    }
+
+    return (
+      this.text === other.text &&
+      this.line_ctr === other.line_ctr &&
+      this.last_token === other.last_token
+    );
+  }
+}
+
 /**
   Lexer interface
 
     Method Signatures:
-        lex(self, text) -> Iterator[Token]
+        lex(self, lexer_state, parser_state) -> Iterator[Token]
     
 */
 
-class Lexer {
-  static get lex() {
+class Lexer extends ABC {
+  lex(lexer_state, parser_state) {
     return NotImplemented;
   }
-  get lex() {
-    return this.constructor.lex;
-  }
+
   make_lexer_state(text) {
     let line_ctr = new LineCounter("\n");
     return new LexerState(text, line_ctr);
@@ -1825,7 +1833,7 @@ function sort_by_key_tuple(arr, key) {
 }
 
 
-class TraditionalLexer extends Lexer {
+class BasicLexer extends Lexer {
   constructor(conf) {
     super();
     let terminals = [...conf.terminals];
@@ -2009,26 +2017,6 @@ class TraditionalLexer extends Lexer {
   }
 }
 
-class LexerState {
-  constructor(text, line_ctr, last_token = null) {
-    this.text = text;
-    this.line_ctr = line_ctr;
-    this.last_token = last_token;
-  }
-
-  eq(other) {
-    if (!(other instanceof LexerState)) {
-      return NotImplemented;
-    }
-
-    return (
-      this.text === other.text &&
-      this.line_ctr === other.line_ctr &&
-      this.last_token === other.last_token
-    );
-  }
-}
-
 class ContextualLexer extends Lexer {
   constructor({ conf, states, always_accept = [] } = {}) {
     super();
@@ -2052,13 +2040,13 @@ class ContextualLexer extends Lexer {
         lexer_conf.terminals = [...accepts]
           .filter((n) => n in terminals_by_name)
           .map((n) => terminals_by_name[n]);
-        lexer = new TraditionalLexer(lexer_conf);
+        lexer = new BasicLexer(lexer_conf);
         lexer_by_tokens.set(key, lexer);
       }
       this.lexers[state] = lexer;
     }
 
-    this.root_lexer = new TraditionalLexer(trad_conf);
+    this.root_lexer = new BasicLexer(trad_conf);
   }
 
   make_lexer_state(text) {
@@ -2146,7 +2134,7 @@ class LexerConf extends Serialize {
     );
     this.ignore = ignore;
     this.postlex = postlex;
-    this.callbacks = callbacks || {};
+    this.callbacks = Object.keys(callbacks).length || {};
     this.g_regex_flags = g_regex_flags;
     this.re_module = re_module;
     this.skip_validation = skip_validation;
@@ -2435,75 +2423,6 @@ function maybe_create_child_filter(
   }
 }
 
-/**
-  Deal with the case where we're expanding children ('_rule') into a parent but the children
-       are ambiguous. i.e. (parent->_ambig->_expand_this_rule). In this case, make the parent itself
-       ambiguous with as many copies as their are ambiguous children, and then copy the ambiguous children
-       into the right parents in the right places, essentially shifting the ambiguity up the tree.
-*/
-
-class _AmbiguousExpander {
-  constructor(to_expand, tree_class, node_builder) {
-    this.node_builder = node_builder;
-    this.tree_class = tree_class;
-    this.to_expand = to_expand;
-  }
-
-  __call__(children) {
-    let to_expand;
-    function _is_ambig_tree(t) {
-      return "data" in t && t.data === "_ambig";
-    }
-
-    // -- When we're repeatedly expanding ambiguities we can end up with nested ambiguities.
-    //    All children of an _ambig node should be a derivation of that ambig node, hence
-    //    it is safe to assume that if we see an _ambig node nested within an ambig node
-    //    it is safe to simply expand it into the parent _ambig node as an alternative derivation.
-    let ambiguous = [];
-    for (const [i, child] of enumerate(children)) {
-      if (_is_ambig_tree(child)) {
-        if (i in this.to_expand) {
-          ambiguous.push(i);
-        }
-
-        to_expand = enumerate(child.children)
-          .filter(([j, grandchild]) => _is_ambig_tree(grandchild))
-          .map(([j, grandchild]) => j);
-        child.expand_kids_by_index(...to_expand);
-      }
-    }
-
-    if (!ambiguous) {
-      return this.node_builder(children);
-    }
-
-    let expand = enumerate(children).map(([i, child]) =>
-      ambiguous.includes(i) ? iter(child.children) : repeat(child)
-    );
-    return this.tree_class(
-      "_ambig",
-      product(zip(...expand)).map((f) => this.node_builder([...f[0]]))
-    );
-  }
-}
-
-const AmbiguousExpander = callable_class(_AmbiguousExpander);
-function maybe_create_ambiguous_expander(
-  tree_class,
-  expansion,
-  keep_all_tokens
-) {
-  let to_expand = enumerate(expansion)
-    .filter(
-      ([i, sym]) =>
-        keep_all_tokens ||
-        (!(sym.is_term && sym.filter_out) && _should_expand(sym))
-    )
-    .map(([i, sym]) => i);
-  if (to_expand.length) {
-    return partial(AmbiguousExpander, to_expand, tree_class);
-  }
-}
 
 /**
   
@@ -2547,67 +2466,6 @@ function maybe_create_ambiguous_expander(
     
 */
 
-class _AmbiguousIntermediateExpander {
-  constructor(tree_class, node_builder) {
-    this.node_builder = node_builder;
-    this.tree_class = tree_class;
-  }
-
-  __call__(children) {
-    let iambig_node, new_tree, processed_nodes, result;
-    function _is_iambig_tree(child) {
-      return "data" in child && child.data === "_iambig";
-    }
-
-    /**
-    
-            Recursively flatten the derivations of the parent of an '_iambig'
-            node. Returns a list of '_inter' nodes guaranteed not
-            to contain any nested '_iambig' nodes, or None if children does
-            not contain an '_iambig' node.
-            
-  */
-    function _collapse_iambig(children) {
-      let collapsed, iambig_node, new_tree, result;
-      // Due to the structure of the SPPF,
-      // an '_iambig' node can only appear as the first child
-      if (children && _is_iambig_tree(children[0])) {
-        iambig_node = children[0];
-        result = [];
-        for (const grandchild of iambig_node.children) {
-          collapsed = _collapse_iambig(grandchild.children);
-          if (collapsed) {
-            for (const child of collapsed) {
-              child.children += children.slice(1);
-            }
-
-            result.push(...collapsed);
-          } else {
-            new_tree = this.tree_class(
-              "_inter",
-              grandchild.children + children.slice(1)
-            );
-            result.push(new_tree);
-          }
-        }
-
-        return result;
-      }
-    }
-
-    let collapsed = _collapse_iambig(children);
-    if (collapsed) {
-      processed_nodes = collapsed.map((c) => this.node_builder(c.children));
-      return this.tree_class("_ambig", processed_nodes);
-    }
-
-    return this.node_builder(children);
-  }
-}
-
-const AmbiguousIntermediateExpander = callable_class(
-  _AmbiguousIntermediateExpander
-);
 function inplace_transformer(func) {
   function f(children) {
     // function name in a Transformer is a rule name.
@@ -2668,14 +2526,6 @@ class ParseTreeBuilder {
             this.maybe_placeholders ? options.empty_indices : []
           ),
           propagate_positions,
-          this.ambiguous &&
-            maybe_create_ambiguous_expander(
-              this.tree_class,
-              rule.expansion,
-              keep_all_tokens
-            ),
-          this.ambiguous &&
-            partial(AmbiguousIntermediateExpander, this.tree_class),
         ]),
       ];
       yield [rule, wrapper_chain];
@@ -3065,7 +2915,7 @@ class InteractiveParser {
   pretty() {
     let out = ["Parser choices:"];
     for (const [k, v] of dict_items(this.choices())) {
-      out.push(format("\t- %s -> %s", k, v));
+      out.push(format("\t- %s -> %r", k, v));
     }
 
     out.push(format("stack size: %s", this.parser_state.state_stack.length));
@@ -3229,12 +3079,13 @@ class ParseTable {
 class IntParseTable extends ParseTable {
   static from_ParseTable(parse_table) {
     const cls = this;
+    let la;
     let enum_ = [...parse_table.states];
     let state_to_idx = Object.fromEntries(
       enumerate(enum_).map(([i, s]) => [s, i])
     );
     let int_states = {};
-    for (let [s, la] of dict_items(parse_table.states)) {
+    for (const [s, la] of dict_items(parse_table.states)) {
       la = Object.fromEntries(
         dict_items(la).map(([k, v]) => [
           k,
@@ -3313,7 +3164,7 @@ class MakeParsingFrontend {
 
 class ParsingFrontend extends Serialize {
   static get __serialize_fields__() {
-    return ["lexer_conf", "parser_conf", "parser", "options"];
+    return ["lexer_conf", "parser_conf", "parser"];
   }
   constructor({ lexer_conf, parser_conf, options, parser = null } = {}) {
     super();
@@ -3342,18 +3193,12 @@ class ParsingFrontend extends Serialize {
     }
 
     if (
-      {
-        standard: create_traditional_lexer,
-        contextual: create_contextual_lexer,
-      } &&
+      { basic: create_basic_lexer, contextual: create_contextual_lexer } &&
       lexer_type in
-        {
-          standard: create_traditional_lexer,
-          contextual: create_contextual_lexer,
-        }
+        { basic: create_basic_lexer, contextual: create_contextual_lexer }
     ) {
       create_lexer = {
-        standard: create_traditional_lexer,
+        basic: create_basic_lexer,
         contextual: create_contextual_lexer,
       }[lexer_type];
       this.lexer = create_lexer(lexer_conf, this.parser, lexer_conf.postlex);
@@ -3420,9 +3265,9 @@ function get_frontend(parser, lexer) {
   if (!(typeof lexer === "object")) {
     // not custom lexer?
     expected = {
-      lalr: ["standard", "contextual"],
-      earley: ["standard", "dynamic", "dynamic_complete"],
-      cyk: ["standard"],
+      lalr: ["basic", "contextual"],
+      earley: ["basic", "dynamic", "dynamic_complete"],
+      cyk: ["basic"],
     }[parser];
     assert_config(
       lexer,
@@ -3466,8 +3311,8 @@ class PostLexConnector {
   }
 }
 
-function create_traditional_lexer(lexer_conf, parser, postlex) {
-  return new TraditionalLexer(lexer_conf);
+function create_basic_lexer(lexer_conf, parser, postlex) {
+  return new BasicLexer(lexer_conf);
 }
 
 function create_contextual_lexer(lexer_conf, parser, postlex) {
@@ -3497,6 +3342,13 @@ var CYK_FrontEnd = NotImplemented;
 // Lark
 //
 
+class PostLex extends ABC {
+  process(stream) {
+    return stream;
+  }
+
+}
+
 /**
   Specifies the options for Lark
 
@@ -3511,7 +3363,7 @@ class LarkOptions extends Serialize {
     start
             The start symbol. Either a string, or a list of strings for multiple possible starts (Default: "start")
     debug
-            Display debug information and extra warnings. Use only when debugging (default: False)
+            Display debug information and extra warnings. Use only when debugging (Default: ````False````)
             When used with Earley, it generates a forest graph as "sppf.png", if 'dot' is installed.
     transformer
             Applies the transformer to every parse tree (equivalent to applying it after the parse, but faster)
@@ -3520,9 +3372,8 @@ class LarkOptions extends Serialize {
             Accepts ````False````, ````True````, or a callable, which will filter which nodes to ignore when propagating.
     maybe_placeholders
             When ````True````, the ````[]```` operator returns ````None```` when not matched.
-
             When ````False````,  ````[]```` behaves like the ````?```` operator, and returns no value at all.
-            (default= ````False````. Recommended to set to ````True````)
+            (default= ````True````)
     cache
             Cache the results of the Lark grammar analysis, for x2 to x3 faster loading. LALR only for now.
 
@@ -3534,7 +3385,7 @@ class LarkOptions extends Serialize {
     g_regex_flags
             Flags that are applied to all terminals (both regex and strings)
     keep_all_tokens
-            Prevent the tree builder from automagically removing "punctuation" tokens (default: False)
+            Prevent the tree builder from automagically removing "punctuation" tokens (Default: ````False````)
     tree_class
             Lark will produce trees comprised of instances of this class instead of the default ````lark.Tree````.
 
@@ -3547,7 +3398,7 @@ class LarkOptions extends Serialize {
             Decides whether or not to use a lexer stage
 
             - "auto" (default): Choose for me based on the parser
-            - "standard": Use a standard lexer
+            - "basic": Use a basic lexer
             - "contextual": Stronger lexer (only works with parser="lalr")
             - "dynamic": Flexible and powerful (only with parser="earley")
             - "dynamic_complete": Same as dynamic, but tries *every* variation of tokenizing possible.
@@ -3562,20 +3413,20 @@ class LarkOptions extends Serialize {
     **=== Misc. / Domain Specific Options ===**
 
     postlex
-            Lexer post-processing (Default: None) Only works with the standard and contextual lexers.
+            Lexer post-processing (Default: ````None````) Only works with the basic and contextual lexers.
     priority
-            How priorities should be evaluated - auto, none, normal, invert (Default: auto)
+            How priorities should be evaluated - "auto", ````None````, "normal", "invert" (Default: "auto")
     lexer_callbacks
             Dictionary of callbacks for the lexer. May alter tokens during lexing. Use with caution.
     use_bytes
-            Accept an input of type ````bytes```` instead of ````str```` (Python 3 only).
+            Accept an input of type ````bytes```` instead of ````str````.
     edit_terminals
             A callback for editing the terminals before parse.
     import_paths
             A List of either paths or loader functions to specify from where grammars are imported
     source_path
             Override the source of from where the grammar was loaded. Useful for relative imports and unconventional grammar loading
-    **=== End Options ===**
+    **=== End of Options ===**
     `;
   }
   get OPTIONS_DOC() {
@@ -3584,44 +3435,37 @@ class LarkOptions extends Serialize {
   // Adding a new option needs to be done in multiple places:
   // - In the dictionary below. This is the primary truth of which options `Lark.__init__` accepts
   // - In the docstring above. It is used both for the docstring of `LarkOptions` and `Lark`, and in readthedocs
-  // - In `lark-stubs/lark.pyi`:
-  //   - As attribute to `LarkOptions`
-  //   - As parameter to `Lark.__init__`
+  // - As an attribute of `LarkOptions` above
   // - Potentially in `_LOAD_ALLOWED_OPTIONS` below this class, when the option doesn't change how the grammar is loaded
   // - Potentially in `lark.tools.__init__`, if it makes sense, and it can easily be passed as a cmd argument
-  static get _defaults() {
-    return {
-      debug: false,
-      keep_all_tokens: false,
-      tree_class: null,
-      cache: false,
-      postlex: null,
-      parser: "earley",
-      lexer: "auto",
-      transformer: null,
-      start: "start",
-      priority: "auto",
-      ambiguity: "auto",
-      regex: false,
-      propagate_positions: false,
-      lexer_callbacks: {},
-      maybe_placeholders: false,
-      edit_terminals: null,
-      g_regex_flags: '',
-      use_bytes: false,
-      import_paths: [],
-      source_path: null,
-    };
-  }
-  get _defaults() {
-    return this.constructor._defaults;
-  }
+  _defaults = {
+    debug: false,
+    keep_all_tokens: false,
+    tree_class: null,
+    cache: false,
+    postlex: null,
+    parser: "earley",
+    lexer: "auto",
+    transformer: null,
+    start: "start",
+    priority: "auto",
+    ambiguity: "auto",
+    regex: false,
+    propagate_positions: false,
+    lexer_callbacks: {},
+    maybe_placeholders: true,
+    edit_terminals: null,
+    g_regex_flags: '',
+    use_bytes: false,
+    import_paths: [],
+    source_path: null,
+  };
   constructor(options_dict) {
     super();
     let value;
     let o = dict(options_dict);
     let options = this;
-    for (const [name, default_] of dict_items(this.constructor._defaults)) {
+    for (const [name, default_] of dict_items(this._defaults)) {
       if (name in o) {
         value = dict_pop(o, name);
         if (
@@ -3679,19 +3523,6 @@ var _LOAD_ALLOWED_OPTIONS = new Set([
 ]);
 var _VALID_PRIORITY_OPTIONS = ["auto", "normal", "invert", null];
 var _VALID_AMBIGUITY_OPTIONS = ["auto", "resolve", "explicit", "forest"];
-class PostLex extends ABC {
-  process(stream) {
-    return stream;
-  }
-
-  static get always_accept() {
-    return [];
-  }
-  get always_accept() {
-    return this.constructor.always_accept;
-  }
-}
-
 /**
   Main interface for the library.
 
@@ -3718,7 +3549,7 @@ class Lark extends Serialize {
       lexer_conf.ignore = [];
     }
 
-    return new TraditionalLexer(lexer_conf);
+    return new BasicLexer(lexer_conf);
   }
 
   _prepare_callbacks() {
@@ -3859,9 +3690,11 @@ class Lark extends Serialize {
   }
 
   /**
-    Only lex (and postlex) the text, without parsing it. Only relevant when lexer='standard'
+    Only lex (and postlex) the text, without parsing it. Only relevant when lexer='basic'
 
         When dont_ignore=True, the lexer will return all tokens, even those marked for %ignore.
+
+        :raises UnexpectedCharacters: In case the lexer cannot find a suitable match.
         
   */
   lex(text, dont_ignore = false) {
@@ -3920,6 +3753,10 @@ class Lark extends Serialize {
             If a transformer is supplied to ``__init__``, returns whatever is the
             result of the transformation. Otherwise, returns a Tree instance.
 
+        :raises UnexpectedInput: On a parse error, one of these sub-exceptions will rise:
+                ``UnexpectedCharacters``, ``UnexpectedToken``, or ``UnexpectedEOF``.
+                For convenience, these sub-exceptions also inherit from ``ParserError`` and ``LexerError``.
+
         
   */
   parse(text, start = null, on_error = null) {
@@ -3938,8 +3775,8 @@ class DedentError extends LarkError {
 class Indenter extends PostLex {
   constructor() {
     super();
-    this.paren_level = null;
-    this.indent_level = null;
+    this.paren_level = 0;
+    this.indent_level = [0];
   }
 
   *handle_NL(token) {
@@ -3976,9 +3813,7 @@ class Indenter extends PostLex {
   *_process(stream) {
     for (const token of stream) {
       if (token.type === this.NL_type) {
-        for (const t of this.handle_NL(token)) {
-          yield t;
-        }
+        yield* this.handle_NL(token);
       } else {
         yield token;
       }
@@ -4006,6 +3841,69 @@ class Indenter extends PostLex {
   get always_accept() {
     return [this.NL_type];
   }
+
+  get NL_type() {
+    throw new NotImplementedError();
+  }
+
+  get OPEN_PAREN_types() {
+    throw new NotImplementedError();
+  }
+
+  get CLOSE_PAREN_types() {
+    throw new NotImplementedError();
+  }
+
+  get INDENT_type() {
+    throw new NotImplementedError();
+  }
+
+  get DEDENT_type() {
+    throw new NotImplementedError();
+  }
+
+  get tab_len() {
+    throw new NotImplementedError();
+  }
+}
+
+class PythonIndenter extends Indenter {
+  static get NL_type() {
+    return "_NEWLINE";
+  }
+  get NL_type() {
+    return this.constructor.NL_type;
+  }
+  static get OPEN_PAREN_types() {
+    return ["LPAR", "LSQB", "LBRACE"];
+  }
+  get OPEN_PAREN_types() {
+    return this.constructor.OPEN_PAREN_types;
+  }
+  static get CLOSE_PAREN_types() {
+    return ["RPAR", "RSQB", "RBRACE"];
+  }
+  get CLOSE_PAREN_types() {
+    return this.constructor.CLOSE_PAREN_types;
+  }
+  static get INDENT_type() {
+    return "_INDENT";
+  }
+  get INDENT_type() {
+    return this.constructor.INDENT_type;
+  }
+  static get DEDENT_type() {
+    return "_DEDENT";
+  }
+  get DEDENT_type() {
+    return this.constructor.DEDENT_type;
+  }
+  static get tab_len() {
+    return 8;
+  }
+  get tab_len() {
+    return this.constructor.tab_len;
+  }
 }
 module.exports = {
   LarkError,
@@ -4029,7 +3927,7 @@ module.exports = {
   Visitor,
   Visitor_Recursive,
   Interpreter,
-  GrammarSymbol,
+  Symbol,
   Terminal,
   NonTerminal,
   RuleOptions,
@@ -4048,5 +3946,6 @@ module.exports = {
   Lark,
   DedentError,
   Indenter,
+  PythonIndenter,
   get_parser,
 };
